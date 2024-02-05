@@ -1,0 +1,17 @@
+name: Upload Go test results
+
+on: [push]
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Go
+        uses: actions/setup-go@v4
+      - name: Install dependencies
+        run: go get .
+      - name: Test with Go
+        run: go test
