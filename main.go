@@ -5,17 +5,29 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"flag"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"math"
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/alecthomas/kingpin/v2"
 )
 
-var addr, amAddr string
+var (
+	app = kingpin.New("alertbit", "A bridge between fluentbit and alertmanager.")
+
+	addr        = app.Flag("addr", "HTTP server listen address").Default(":8090").String()
+	amAddr      = app.Flag("alertmanager-addr", "Alertmanager Host").Default("localhost:9093").String()
+	labels      = app.Flag("labels", "Extra labels").StringMap()
+	ignoreLabel = app.Flag("ignore-label", "Label to ignore").Strings()
+	ttl         = app.Flag("ttl", "Alerts time to live").Default("300s").Duration()
+
+	now = app.Flag("now", "Use current time").Bool()
+)
 
 type InputObject map[string]interface{}
 
@@ -28,14 +40,12 @@ type Alert struct {
 }
 
 func main() {
-	flag.StringVar(&addr, "addr", ":8090", "HTTP server listen address")
-	flag.StringVar(&amAddr, "alertmanager-addr", "localhost:9093", "Alertmanager Host")
-	flag.Parse()
+	kingpin.MustParse(app.Parse(os.Args[1:]))
 
 	http.HandleFunc("/", postHandler) // Set the handler for POST requests
 
-	fmt.Printf("Listening on %s\n", addr)
-	if err := http.ListenAndServe(addr, nil); err != nil {
+	fmt.Printf("Listening on %s\n", *addr)
+	if err := http.ListenAndServe(*addr, nil); err != nil {
 		log.Fatalf("Error starting server: %v", err)
 	}
 }
@@ -71,31 +81,57 @@ func postHandler(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			continue
 		}
+		if *now {
+			date = float64(time.Now().Unix())
+		}
 		// Convert epoch to RFC3339
 		startsAt := time.Unix(int64(math.Round(date)), 0).Format(time.RFC3339)
-		endsAt := time.Unix(int64(math.Round(date+300)), 0).Format(time.RFC3339)
+		endsAt := time.Unix(int64(math.Round(date)), 0).Add(*ttl).Format(time.RFC3339)
 
 		// Compute checksum as log_id
 		jsonBytes, _ := json.Marshal(obj)
 		checksum := sha256.Sum256(jsonBytes)
 		logID := hex.EncodeToString(checksum[:])
+		if len(logID) > 10 {
+			logID = logID[:8]
+		}
 
+		lbls := map[string]string{
+			"__log_id": logID,
+		}
 		anns := make(map[string]string)
+		if labels != nil {
+			for k, v := range *labels {
+				lbls[k] = v
+			}
+		}
 		for k, v := range obj {
 			if k == "date" {
 				continue
 			}
+			fnd := true
+			// Always add fields as annotations.
 			anns[k] = fmt.Sprintf("%v", v)
+			if ignoreLabel != nil {
+				for _, l := range *ignoreLabel {
+					if k == l {
+						fnd = false
+						continue
+					}
+				}
+			}
+			if !fnd {
+				continue
+			}
+			lbls[k] = fmt.Sprintf("%v", v)
 		}
 
 		alert := Alert{
-			Labels: map[string]string{
-				"log_id": logID,
-			},
+			Labels:       lbls,
 			Annotations:  anns,
 			StartsAt:     startsAt,
 			EndsAt:       endsAt,
-			GeneratorURL: "bridge",
+			GeneratorURL: "http://bridge.invalid",
 		}
 
 		alerts = append(alerts, alert)
@@ -110,7 +146,7 @@ func postHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Post alerts to the specified URL
-	resp, err := http.Post(fmt.Sprintf("http://%s/api/v2/alerts", amAddr), "application/json", bytes.NewBuffer(alertsJSON))
+	resp, err := http.Post(fmt.Sprintf("http://%s/api/v2/alerts", *amAddr), "application/json", bytes.NewBuffer(alertsJSON))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error posting alerts: %v\n", err)
 		http.Error(w, "Error posting alerts", http.StatusInternalServerError)
@@ -118,5 +154,10 @@ func postHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	w.WriteHeader(http.StatusNoContent)
+	_, err = io.Copy(w, resp.Body)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error copying response body: %v\n", err)
+	}
+
+	w.WriteHeader(resp.StatusCode)
 }

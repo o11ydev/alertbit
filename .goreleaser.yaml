@@ -38,6 +38,31 @@ archives:
       - goos: windows
         format: zip
 
+nfpms:
+  # note that this is an array of nfpm configs
+  - #
+    id: rpms
+    package_name: alertbit
+    file_name_template: "{{ .ConventionalFileName }}"
+    vendor: O11y
+    homepage: https://github.com/o11ydev/alertbit
+    maintainer: O11y <nomail@o11y.eu>
+    description: |-
+      An integration tool designed to bridge Fluent Bit
+      with Prometheus' Alertmanager, enabling dynamic
+      alerting capabilities based on logs and events
+      captured by Fluent Bit.
+    license: Apache 2.0
+    formats:
+      - apk
+      - deb
+      - rpm
+      - termux.deb # Since: v1.11
+      - archlinux # Since: v1.13
+    umask: 0o002
+    bindir: /usr/bin
+    section: default
+    priority: extra
 changelog:
   sort: asc
   filters:
