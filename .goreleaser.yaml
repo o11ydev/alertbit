@@ -72,4 +72,4 @@ changelog:
 
 dockers:
   - image_templates:
-    - quay.io:o11ydev/alertbit
+    - quay.io/o11ydev/alertbit
