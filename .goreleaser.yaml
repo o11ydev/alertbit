@@ -69,3 +69,7 @@ changelog:
     exclude:
       - "^docs:"
       - "^test:"
+
+dockers:
+  - image_templates:
+    - quay.io:o11ydev/alertbit
