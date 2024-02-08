@@ -70,6 +70,13 @@ changelog:
       - "^docs:"
       - "^test:"
 
-dockers:
-  - image_templates:
-    - quay.io/o11ydev/alertbit
+kos:
+  - repository: quay.io/o11ydev/alertbit
+    tags:
+    - '{{.Version}}'
+    - latest
+    bare: true
+    preserve_import_paths: false
+    platforms:
+    - linux/amd64
+    - linux/arm64
