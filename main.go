@@ -42,12 +42,22 @@ type Alert struct {
 func main() {
 	kingpin.MustParse(app.Parse(os.Args[1:]))
 
-	http.HandleFunc("/", postHandler) // Set the handler for POST requests
+	http.HandleFunc("/-/ready", readyHandler)
+	http.HandleFunc("/-/healthy", healthyHandler)
+	http.HandleFunc("/", postHandler)
 
 	fmt.Printf("Listening on %s\n", *addr)
 	if err := http.ListenAndServe(*addr, nil); err != nil {
 		log.Fatalf("Error starting server: %v", err)
 	}
+}
+
+func readyHandler(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+}
+
+func healthyHandler(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
 }
 
 func postHandler(w http.ResponseWriter, r *http.Request) {
