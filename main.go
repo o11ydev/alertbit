@@ -1,32 +1,44 @@
 package main
 
 import (
-	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"io/ioutil"
-	"log"
 	"math"
 	"net/http"
 	"os"
 	"time"
 
 	"github.com/alecthomas/kingpin/v2"
+	"github.com/go-kit/log"
+	"github.com/go-kit/log/level"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"github.com/prometheus/prometheus/config"
+	"github.com/prometheus/prometheus/discovery"
+	"github.com/prometheus/prometheus/discovery/targetgroup"
+	labelspkg "github.com/prometheus/prometheus/model/labels"
+	"github.com/prometheus/prometheus/notifier"
+	"gopkg.in/yaml.v2"
 )
 
 var (
 	app = kingpin.New("alertbit", "A bridge between fluentbit and alertmanager.")
 
-	addr        = app.Flag("addr", "HTTP server listen address").Default(":8090").String()
-	amAddr      = app.Flag("alertmanager-addr", "Alertmanager Host").Default("localhost:9093").String()
-	labels      = app.Flag("labels", "Extra labels").StringMap()
-	ignoreLabel = app.Flag("ignore-label", "Label to ignore").Strings()
-	ttl         = app.Flag("ttl", "Alerts time to live").Default("300s").Duration()
+	addr            = app.Flag("addr", "HTTP server listen address").Default(":8090").String()
+	cfgFile         = app.Flag("sd-config", "Service Discovery").Default("config.yml").String()
+	labels          = app.Flag("labels", "Extra labels").StringMap()
+	ignoreLabel     = app.Flag("ignore-label", "Label to ignore").Strings()
+	ttl             = app.Flag("ttl", "Alerts time to live").Default("300s").Duration()
+	notifierManager *notifier.Manager
 
 	now = app.Flag("now", "Use current time").Bool()
+
+	targets map[string][]*targetgroup.Group
 )
 
 type InputObject map[string]interface{}
@@ -39,25 +51,76 @@ type Alert struct {
 	GeneratorURL string            `json:"generatorURL"`
 }
 
+type Config struct {
+	AlertingConfig config.AlertingConfig `yaml:"alerting"`
+}
+
 func main() {
 	kingpin.MustParse(app.Parse(os.Args[1:]))
 
+	http.Handle("/metrics", promhttp.Handler())
 	http.HandleFunc("/-/ready", readyHandler)
 	http.HandleFunc("/-/healthy", healthyHandler)
 	http.HandleFunc("/", postHandler)
 
+	logger := log.NewLogfmtLogger(log.NewSyncWriter(os.Stderr))
+	sdMetrics, err := discovery.CreateAndRegisterSDMetrics(prometheus.DefaultRegisterer)
+	if err != nil {
+		level.Error(logger).Log("msg", "failed to register service discovery metrics", "err", err)
+		os.Exit(1)
+	}
+	discoveryManagerNotify := discovery.NewManager(context.TODO(), log.With(logger, "component", "discovery manager scrape"), prometheus.DefaultRegisterer, sdMetrics, discovery.Name("scrape"))
+	if discoveryManagerNotify == nil {
+		os.Exit(1)
+	}
+
+	content, err := os.ReadFile(*cfgFile)
+	if err != nil {
+		fmt.Println(err.Error())
+		os.Exit(1)
+	}
+	cfg := &Config{}
+
+	err = yaml.UnmarshalStrict([]byte(content), cfg)
+	if err != nil {
+		fmt.Println(err.Error())
+		os.Exit(1)
+	}
+
+	c := make(map[string]discovery.Configs)
+	for k, v := range cfg.AlertingConfig.AlertmanagerConfigs.ToMap() {
+		c[k] = v.ServiceDiscoveryConfigs
+	}
+	err = discoveryManagerNotify.ApplyConfig(c)
+	if err != nil {
+		fmt.Println(err.Error())
+		os.Exit(1)
+	}
+
+	notifierOpt := notifier.Options{
+		Registerer:    prometheus.DefaultRegisterer,
+		QueueCapacity: 3000,
+	}
+	notifierManager = notifier.NewManager(&notifierOpt, log.With(logger, "component", "notifier"))
+	go notifierManager.Run(discoveryManagerNotify.SyncCh())
+
 	fmt.Printf("Listening on %s\n", *addr)
 	if err := http.ListenAndServe(*addr, nil); err != nil {
-		log.Fatalf("Error starting server: %v", err)
+		logger.Log("error", fmt.Sprintf("Error starting server: %v", err))
 	}
+
 }
 
 func readyHandler(w http.ResponseWriter, r *http.Request) {
+	if notifierManager == nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
 	w.WriteHeader(http.StatusOK)
 }
 
 func healthyHandler(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusOK)
+	readyHandler(w, r)
 }
 
 func postHandler(w http.ResponseWriter, r *http.Request) {
@@ -84,7 +147,7 @@ func postHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var alerts []Alert
+	var alerts []*notifier.Alert
 
 	for _, obj := range inputObjects {
 		date, ok := obj["date"].(float64)
@@ -95,8 +158,8 @@ func postHandler(w http.ResponseWriter, r *http.Request) {
 			date = float64(time.Now().Unix())
 		}
 		// Convert epoch to RFC3339
-		startsAt := time.Unix(int64(math.Round(date)), 0).Format(time.RFC3339)
-		endsAt := time.Unix(int64(math.Round(date)), 0).Add(*ttl).Format(time.RFC3339)
+		startsAt := time.Unix(int64(math.Round(date)), 0)
+		endsAt := time.Unix(int64(math.Round(date)), 0).Add(*ttl)
 
 		// Compute checksum as log_id
 		jsonBytes, _ := json.Marshal(obj)
@@ -136,9 +199,9 @@ func postHandler(w http.ResponseWriter, r *http.Request) {
 			lbls[k] = fmt.Sprintf("%v", v)
 		}
 
-		alert := Alert{
-			Labels:       lbls,
-			Annotations:  anns,
+		alert := &notifier.Alert{
+			Labels:       labelspkg.FromMap(lbls),
+			Annotations:  labelspkg.FromMap(anns),
 			StartsAt:     startsAt,
 			EndsAt:       endsAt,
 			GeneratorURL: "http://bridge.invalid",
@@ -147,27 +210,7 @@ func postHandler(w http.ResponseWriter, r *http.Request) {
 		alerts = append(alerts, alert)
 	}
 
-	// Marshal alerts into JSON
-	alertsJSON, err := json.Marshal(alerts)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error marshaling alerts: %v\n", err)
-		http.Error(w, "Error marshaling alerts", http.StatusInternalServerError)
-		return
-	}
+	notifierManager.Send(alerts...)
 
-	// Post alerts to the specified URL
-	resp, err := http.Post(fmt.Sprintf("http://%s/api/v2/alerts", *amAddr), "application/json", bytes.NewBuffer(alertsJSON))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error posting alerts: %v\n", err)
-		http.Error(w, "Error posting alerts", http.StatusInternalServerError)
-		return
-	}
-	defer resp.Body.Close()
-
-	_, err = io.Copy(w, resp.Body)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error copying response body: %v\n", err)
-	}
-
-	w.WriteHeader(resp.StatusCode)
+	w.WriteHeader(http.StatusOK)
 }
