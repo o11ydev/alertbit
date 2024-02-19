@@ -23,6 +23,8 @@ import (
 	"github.com/prometheus/prometheus/discovery/targetgroup"
 	labelspkg "github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/notifier"
+
+	_ "github.com/prometheus/prometheus/plugins"
 )
 
 var (

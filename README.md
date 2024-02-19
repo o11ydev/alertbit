@@ -6,3 +6,16 @@ and events captured by Fluent Bit. AlertBit listens for HTTP POST requests from
 Fluent Bit and converts these into alerts that are then forwarded to Prometheus'
 Alertmanager. This allows for flexible and powerful notification workflows,
 leveraging the extensive capabilities of Alertmanager's receivers.
+
+
+## Config
+
+Alertbit takes a Prometheus config, but only uses the alerting part:
+
+```yaml
+alerting:
+  alertmanagers:
+  - static_configs:
+      - targets:
+        - 127.0.0.1:9093
+```
