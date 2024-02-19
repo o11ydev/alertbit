@@ -23,7 +23,6 @@ import (
 	"github.com/prometheus/prometheus/discovery/targetgroup"
 	labelspkg "github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/notifier"
-	"gopkg.in/yaml.v2"
 )
 
 var (
@@ -51,10 +50,6 @@ type Alert struct {
 	GeneratorURL string            `json:"generatorURL"`
 }
 
-type Config struct {
-	AlertingConfig config.AlertingConfig `yaml:"alerting"`
-}
-
 func main() {
 	kingpin.MustParse(app.Parse(os.Args[1:]))
 
@@ -74,14 +69,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	content, err := os.ReadFile(*cfgFile)
-	if err != nil {
-		fmt.Println(err.Error())
-		os.Exit(1)
-	}
-	cfg := &Config{}
+	cfg, err := config.LoadFile(*cfgFile, false, false, logger)
 
-	err = yaml.UnmarshalStrict([]byte(content), cfg)
 	if err != nil {
 		fmt.Println(err.Error())
 		os.Exit(1)
@@ -96,12 +85,14 @@ func main() {
 		fmt.Println(err.Error())
 		os.Exit(1)
 	}
+	go discoveryManagerNotify.Run()
 
 	notifierOpt := notifier.Options{
 		Registerer:    prometheus.DefaultRegisterer,
 		QueueCapacity: 3000,
 	}
 	notifierManager = notifier.NewManager(&notifierOpt, log.With(logger, "component", "notifier"))
+	notifierManager.ApplyConfig(cfg)
 	go notifierManager.Run(discoveryManagerNotify.SyncCh())
 
 	fmt.Printf("Listening on %s\n", *addr)
