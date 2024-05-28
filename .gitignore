@@ -1,2 +1,5 @@
 alertbit
 dist/
+.cr-release-packages/
+*.tgz
+index.yaml

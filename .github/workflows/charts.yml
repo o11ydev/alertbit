@@ -1,0 +1,57 @@
+---
+name: charts
+
+on:
+  push:
+    tags:
+      '*'
+
+permissions:
+  contents: write
+
+env:
+  CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+
+jobs:
+  chart-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Configure Git
+        run: |
+          git config user.name "$GITHUB_ACTOR"
+          git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          check-latest: true
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+      - name: Lint and test chart
+        run: |
+          helm lint ./chart
+          helm template ./chart
+      - name: Package the helm chart
+        run: |
+          helm package --version ${GITHUB_REF_NAME}-chart ./chart
+      - name: Upload to github releases
+        uses: softprops/action-gh-release@v2
+        with:
+          files: "./alertbit-*-chart.tgz"
+      - name: Create index chart
+        run: |
+          helm repo index ./ --url https://o11ydev.github.io/alertbit
+      - name: Clean up release artifact
+        run: |
+          rm ./alertbit-${GITHUB_REF_NAME}-chart.tgz
+      - name: Push chart index
+        run: |
+          git fetch
+          git checkout gh-pages
+          git add --force index.yaml
+          git commit -m "Chart release ${GITHUB_REF_NAME}"
+          git push origin gh-pages
